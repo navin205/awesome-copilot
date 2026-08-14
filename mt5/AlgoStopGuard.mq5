@@ -75,6 +75,11 @@ input double InpTargetTolerance   = 200.0;   // "Close to it" tolerance (fires a
 input bool   InpEnableGivebackRule= true;    // RULE B: stop if profit falls back from the peak
 input double InpPeakGiveback      = 400.0;   // Give-back from peak that triggers RULE B
 
+input group "=== 3b. RULE D - protective bail-out (OVERRIDES the gate) ==="
+input bool   InpEnableBailout     = true;    // Bail out if the day turns after arming
+input double InpBailoutArmProfit  = 4500.0;  // Watch the drawdown once profit has touched this
+input double InpBailoutDrawdown   = 1000.0;  // Drawdown that ends the day, gate or no gate
+
 input group "=== 4. Session window (IST by default) ==="
 input int  InpTzOffsetMinutes = 330;   // Minutes ahead of GMT (IST = 330)
 input int  InpStartHour       = 6;     // Window start hour (local tz above)
@@ -115,6 +120,7 @@ string   g_currentDay     = "";      // IST date currently being tracked
 double   g_dayStartEquity = 0.0;     // equity captured at the start of the IST day
 double   g_dayPeakProfit  = 0.0;     // best profit seen today
 bool     g_ddRelaxed      = false;   // day touched InpRelaxDdAtProfit: wider ceiling in force
+bool     g_bailoutArmed   = false;   // day touched InpBailoutArmProfit: bail-out is watching
 bool     g_dllOk          = false;   // DLL imports available
 datetime g_lastArmedLog   = 0;       // throttle for "waiting for drawdown" messages
 datetime g_lastEnforceLog = 0;       // throttle for enforcement messages
@@ -126,7 +132,10 @@ string   g_lastStopReason = "";
 double   g_dayProfit      = 0.0;
 double   g_floating       = 0.0;
 double   g_closed         = 0.0;
-double   g_drawdown       = 0.0;
+double   g_drawdown       = 0.0;   // drawdown per InpDrawdownMode
+double   g_openLoss       = 0.0;   // open floating loss on tracked positions
+double   g_peakGiveback   = 0.0;   // profit handed back from the day's peak
+double   g_riskDrawdown   = 0.0;   // worst of the two, used by the bail-out
 bool     g_inWindow       = false;
 
 //+------------------------------------------------------------------+
@@ -283,22 +292,36 @@ void RefreshPnl()
                          g_dayPeakProfit, InpMaxDrawdown, InpMaxDrawdownAtTarget));
      }
 
-   double openLoss  = (g_floating < 0.0 ? -g_floating : 0.0);
-   double fromPeak  = g_dayPeakProfit - g_dayProfit;
-   if(fromPeak < 0.0)
-      fromPeak = 0.0;
+   g_openLoss = (g_floating < 0.0 ? -g_floating : 0.0);
+
+   g_peakGiveback = g_dayPeakProfit - g_dayProfit;
+   if(g_peakGiveback < 0.0)
+      g_peakGiveback = 0.0;
 
    switch(InpDrawdownMode)
      {
       case DD_FROM_PEAK:
-         g_drawdown = fromPeak;
+         g_drawdown = g_peakGiveback;
          break;
       case DD_WORST_OF_2:
-         g_drawdown = MathMax(openLoss, fromPeak);
+         g_drawdown = MathMax(g_openLoss, g_peakGiveback);
          break;
       default:
-         g_drawdown = openLoss;
+         g_drawdown = g_openLoss;
          break;
+     }
+
+   //--- The bail-out watches BOTH measures whatever InpDrawdownMode says: a day
+   //--- can bleed either through open floating loss or through losses the bot
+   //--- has already realised, and the protective stop has to catch both.
+   g_riskDrawdown = MathMax(g_openLoss, g_peakGiveback);
+
+   if(!g_bailoutArmed && InpEnableBailout && g_dayPeakProfit >= InpBailoutArmProfit)
+     {
+      g_bailoutArmed = true;
+      Print(StringFormat("AlgoStopGuard: bail-out ARMED - day touched %.2f. From here a drawdown of "
+                         "%.2f closes everything and stops trading for the day.",
+                         g_dayPeakProfit, InpBailoutDrawdown));
      }
   }
 
@@ -390,9 +413,9 @@ bool CloseScopeMatches()
    return PositionMatches();
   }
 
-//--- The stop gate already guarantees profit >= InpMinStopProfit and
-//--- drawdown <= InpMaxDrawdown, so a stop that fires at all is by
-//--- definition a day worth flattening.
+//--- Every stop path wants the book flat: a gated stop because the day's
+//--- target is banked, a RULE D bail-out because the day has turned and
+//--- leaving positions running is the thing being avoided.
 bool ShouldCloseOut()
   {
    return InpCloseOnStop;
@@ -555,6 +578,7 @@ void StartNewDay(const string day)
    g_dayStartEquity = AccountInfoDouble(ACCOUNT_BALANCE) - ClosedProfitToday(false);
    g_dayPeakProfit  = 0.0;
    g_ddRelaxed      = false;
+   g_bailoutArmed   = false;
    g_lastStopReason = "";
    g_lockedToday    = (g_lockedDay == day);
    Print("AlgoStopGuard: tracking ", day, " - day start balance ",
@@ -662,6 +686,22 @@ void LogGateBlock()
 
 bool EvaluateRules(string &reason)
   {
+   //--- RULE D - protective bail-out, checked FIRST and deliberately outside the
+   //--- gate. The gate refuses to stop while the drawdown is wide; this rule
+   //--- exists for exactly that case: the day made real money, then turned, and
+   //--- the right move is to get flat rather than wait for a calm that may not
+   //--- come. It uses the worst of open loss and peak give-back.
+   if(InpEnableBailout
+      && g_dayPeakProfit >= InpBailoutArmProfit
+      && g_riskDrawdown  >= InpBailoutDrawdown)
+     {
+      reason = StringFormat("RULE D bail-out: peak %.2f reached the %.2f arm level and drawdown %.2f "
+                            "hit %.2f (open loss %.2f, gave back %.2f)",
+                            g_dayPeakProfit, InpBailoutArmProfit, g_riskDrawdown, InpBailoutDrawdown,
+                            g_openLoss, g_peakGiveback);
+      return true;
+     }
+
    //--- GATE: profit floor and drawdown ceiling. No rule below can override this.
    if(!GateOpen())
      {
@@ -718,6 +758,15 @@ void DrawPanel()
                                   InpMinStopProfit, EffectiveMaxDrawdown(),
                                   (g_ddRelaxed ? " - widened, target was reached" : ""));
 
+   string bailInfo;
+   if(!InpEnableBailout)
+      bailInfo = "off";
+   else
+      if(g_bailoutArmed)
+         bailInfo = StringFormat("ARMED - fires at DD %.0f (now %.0f)", InpBailoutDrawdown, g_riskDrawdown);
+      else
+         bailInfo = StringFormat("waiting for peak %.0f (now %.0f)", InpBailoutArmProfit, g_dayPeakProfit);
+
    string closeInfo = (InpCloseOnStop
                        ? StringFormat("yes - %s%s",
                                       (InpCloseScope == CLOSE_ALL_POSITIONS ? "all positions" : "tracked only"),
@@ -747,6 +796,7 @@ void DrawPanel()
                     "Drawdown        : %10.2f %s  (ceiling %.2f)\n"
                     "-----------------------------------------\n"
                     "GATE            : %s\n"
+                    "Bail-out (D)    : %s\n"
                     "Target fires at : %10.2f %s\n"
                     "Close on stop   : %s\n"
                     "AutoTrading     : %s\n"
@@ -762,6 +812,7 @@ void DrawPanel()
                     g_dayPeakProfit, ccy,
                     g_drawdown, ccy, EffectiveMaxDrawdown(),
                     gateInfo,
+                    bailInfo,
                     InpTargetProfit - InpTargetTolerance, ccy,
                     closeInfo,
                     (AlgoTradingEnabled() ? "ON" : "OFF"),
@@ -796,6 +847,17 @@ int OnInit()
    if(InpMinStopProfit <= 0.0)
      {
       Print("AlgoStopGuard: InpMinStopProfit must be greater than 0.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpEnableBailout && InpBailoutDrawdown <= InpMaxDrawdown)
+     {
+      Print("AlgoStopGuard: InpBailoutDrawdown must be above InpMaxDrawdown, otherwise the bail-out "
+            "fires before the profit gate can ever open.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpEnableBailout && InpBailoutArmProfit <= 0.0)
+     {
+      Print("AlgoStopGuard: InpBailoutArmProfit must be greater than 0.");
       return INIT_PARAMETERS_INCORRECT;
      }
    if(InpRelaxDdAtProfit > 0.0 && InpMaxDrawdownAtTarget < InpMaxDrawdown)
@@ -840,6 +902,11 @@ int OnInit()
          " (fires at ", DoubleToString(InpTargetProfit - InpTargetTolerance, 2), ")",
          " | window ", InpStartHour, ":", InpStartMinute, "-", InpEndHour, ":", InpEndMinute,
          " GMT+", DoubleToString(InpTzOffsetMinutes / 60.0, 1));
+
+   if(InpEnableBailout)
+      Print("AlgoStopGuard: BAIL-OUT: once the day touches ", DoubleToString(InpBailoutArmProfit, 2),
+            ", a drawdown of ", DoubleToString(InpBailoutDrawdown, 2),
+            " ends the day immediately, gate or no gate.");
 
    if(InpCloseOnStop)
       Print("AlgoStopGuard: when the stop fires it will also close ",

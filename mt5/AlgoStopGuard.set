@@ -11,8 +11,10 @@
 ;   day profit >= InpMinStopProfit (5000)
 ;   drawdown  <= the ceiling in force: 100 normally, 1000 once the day
 ;                has touched 6000 (InpRelaxDdAtProfit)
-; are true at that instant. Nothing below can override those two.
-; On a stop: positions and pending orders are closed FIRST, then the
+; are true at that instant. The ONE exception is the RULE D bail-out:
+; once the day has touched 4500, a drawdown of 1000 ends the day
+; immediately, gate or no gate.
+; On any stop: positions and pending orders are closed FIRST, then the
 ; button is pressed.
 ; ------------------------------------------------------------------
 
@@ -42,6 +44,14 @@ InpTargetTolerance=200.0
 ; Rule B: day peaked above the gate and has given back this much
 InpEnableGivebackRule=true
 InpPeakGiveback=400.0
+
+; === 3b. RULE D - protective bail-out (OVERRIDES the gate) ===
+; Once the day has TOUCHED 4500, the drawdown is watched: if it reaches
+; 1000 the day ends immediately - everything is closed and algo trading
+; is switched off, no matter what the gate says.
+InpEnableBailout=true
+InpBailoutArmProfit=4500.0
+InpBailoutDrawdown=1000.0
 
 ; === 4. Session window (IST = GMT+5:30 = 330 minutes) ===
 InpTzOffsetMinutes=330

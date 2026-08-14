@@ -64,10 +64,33 @@ Rule A is your main condition. Rule B is what holds the 5000–6000 band togethe
 5900 and starts sliding, B stops the day at ~5500 rather than waiting for a 5800 print that may never
 come back. Both still have to pass the gate.
 
-**The trade-off to know about:** the drawdown check is absolute, so a day stuck at 5500 with a 300
-drawdown keeps trading and that profit can bleed away. The 1000 tier removes this above 6000, but
-between 5000 and 6000 the tight ceiling still rules. If that proves too strict in practice, raise
-`InpMaxDrawdown` — no rule will bypass it.
+### Rule D — the bail-out, the one thing that overrides the gate
+
+> once the day has **touched `InpBailoutArmProfit` (4500)**, a drawdown reaching
+> **`InpBailoutDrawdown` (1000)** ends the day immediately
+
+This runs *before* the gate and ignores it, by design. The gate refuses to stop while the drawdown is
+wide; Rule D exists for exactly that situation — the day made real money, then turned, and getting
+flat beats waiting for a calm that may not arrive. It closes everything and switches AutoTrading off
+just like any other stop.
+
+It deliberately measures drawdown as the **worst of open floating loss and give-back from the day's
+peak**, whatever `InpDrawdownMode` is set to. A day can bleed either way — positions sitting at a
+loss, or losses the bot has already realised — and a protective stop that only watched one of them
+would miss half the ways a good day goes bad.
+
+Arming is sticky and keyed to the day's peak, so a day that touches 4600 stays under the bail-out's
+watch even after profit falls back. The Experts log announces both moments:
+
+```
+AlgoStopGuard: bail-out ARMED - day touched 4512.00. From here a drawdown of
+1000.00 closes everything and stops trading for the day.
+```
+
+**The trade-off to know about:** between 5000 and 6000 the tight 100 ceiling rules, so a day stuck at
+5500 with a 300 drawdown keeps trading. It is no longer unbounded — Rule D ends it if that drawdown
+reaches 1000 — but the outcome there is a bail-out, not a banked target. If it proves too strict in
+practice, raise `InpMaxDrawdown`; no rule other than D will bypass it.
 
 When a rule fires the EA closes out (see below), presses the button, verifies
 `TERMINAL_TRADE_ALLOWED` actually went false (retrying up to `InpMaxClickAttempts` times), logs and
@@ -106,6 +129,7 @@ lock file).
 | `InpMinStopProfit` | `5000` | Gate: the button is never pressed below this profit. |
 | `InpMaxDrawdown` | `100` | Gate: drawdown ceiling before the day reaches target. With `InpDrawdownMode=0` this is the open floating loss on the bot's positions. Mode 1 measures give-back from the day's peak; mode 2 uses the worse of the two. |
 | `InpRelaxDdAtProfit` / `InpMaxDrawdownAtTarget` | `6000` / `1000` | Once the day touches 6000, the ceiling becomes 1000 for the rest of the day. `0` disables the tier. |
+| `InpBailoutArmProfit` / `InpBailoutDrawdown` | `4500` / `1000` | Rule D: after touching 4500, a 1000 drawdown ends the day regardless of the gate. |
 | `InpTargetProfit` / `InpTargetTolerance` | `6000` / `200` | The "or close to it" band — fires at 5800. |
 | `InpTzOffsetMinutes` | `330` | IST = GMT+5:30. The EA derives the window from GMT, so it is immune to your broker's server time and to DST. |
 | `InpStartHour` … `InpEndMinute` | `06:00`–`17:00` | Weekdays only via `InpWeekdaysOnly`. |
