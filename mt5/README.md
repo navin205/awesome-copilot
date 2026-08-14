@@ -30,19 +30,31 @@ Turning it off stops **every** EA in that terminal from placing new orders, whic
 ## What it does
 
 Every second, inside the session window, it computes the day's P/L for magic `777`
-(closed deals since local midnight + floating on open positions, including swap/commission) and
-evaluates four rules. Any one of them fires the stop:
+(closed deals since local midnight + floating on open positions, including swap/commission).
+
+### The gate — the button never goes off unless both of these hold
+
+> **day profit ≥ `InpMinStopProfit` (5000)** **and** **drawdown ≤ `InpMaxDrawdown` (100)**
+
+This is checked at the instant of stopping and nothing can override it. If profit is at 6000 but the
+drawdown is 300, the EA does **not** press the button — it logs `HOLDING …` once a minute and waits
+for the drawdown to come in.
+
+### The rules — *when* to stop, once the gate is open
 
 | Rule | Fires when | Default |
 | --- | --- | --- |
-| **A — Target** | profit ≥ `InpTargetProfit − InpTargetTolerance` **and** drawdown ≤ `InpMaxDrawdown` | 5800 USC with DD ≤ 100 |
-| **B — Lock-in** | the day peaked ≥ `InpMinLockProfit` and has given back ≥ `InpPeakGiveback` while still ≥ `InpMinLockProfit` | peak ≥ 5000, gives back 400 |
-| **C — Fail-safe** | profit ≥ `InpFailsafeProfit`, regardless of drawdown | 6500 USC |
-| **D — Window end** | window closes with profit ≥ `InpMinLockProfit` (off by default) | disabled |
+| **A — Target** | profit ≥ `InpTargetProfit − InpTargetTolerance` | 5800 USC |
+| **B — Lock-in** | the day peaked ≥ the gate and has given back ≥ `InpPeakGiveback` | peak ≥ 5000, gives back 400 |
+| **C — Window end** | the window closes (off by default) | disabled |
 
-Rule A is your main condition. Rule B is what guarantees the 5000–6000 band: if profit spikes past
-5000 but the drawdown never drops below 100, Rule A never fires and the profit could bleed away —
-Rule B takes it on the way down instead. Rule C is the backstop for a stuck-wide drawdown.
+Rule A is your main condition. Rule B is what holds the 5000–6000 band together: if profit peaks at
+5900 and starts sliding, B stops the day at ~5500 rather than waiting for a 5800 print that may never
+come back. Both still have to pass the gate.
+
+**The trade-off to know about:** because the drawdown check is absolute, a day that reaches 6000 with
+a stubborn 300 drawdown will keep trading, and that profit can bleed away. That is the behaviour you
+asked for. If you ever want to relax it, raise `InpMaxDrawdown` — do not expect a rule to bypass it.
 
 When a rule fires the EA closes out (see below), presses the button, verifies
 `TERMINAL_TRADE_ALLOWED` actually went false (retrying up to `InpMaxClickAttempts` times), logs and
@@ -51,15 +63,9 @@ alerts, and writes a lock file `MQL5/Files/AlgoStopGuard_<login>.txt`.
 ## Closing out on stop
 
 Switching AutoTrading off only blocks *new* orders — open positions keep running and pending orders
-still trigger on the server. So when the stop fires the EA also flattens the book, but only when the
-day is genuinely in the money:
-
-> **day profit ≥ `InpCloseMinProfit` (5000) and drawdown ≤ `InpCloseMaxDrawdown` (100)**
-
-Both are measured at the instant of stopping, with the same drawdown definition as the stop rules.
-If either fails the positions are left alone and the reason is written to the Experts log — that way
-a Rule C fail-safe stop with a wide drawdown never dumps positions at a bad moment; it just stops the
-bot from opening more.
+still trigger on the server. So whenever the stop fires, the EA flattens the book as well. It needs
+no extra conditions: the gate has already proved profit ≥ 5000 and drawdown ≤ 100, so a stop that
+fires at all is by definition a day worth closing flat.
 
 The close-out runs **before** the button is pressed, because once AutoTrading is off this EA cannot
 trade either. It retries up to `InpClosePasses` times, sets the fill policy per symbol, and allows
@@ -68,9 +74,8 @@ alert so you can finish it by hand.
 
 | Input | Default | Notes |
 | --- | --- | --- |
-| `InpCloseOnStop` | `true` | Master switch for the close-out. |
+| `InpCloseOnStop` | `true` | Master switch. Set `false` to leave positions on their SL/TP. |
 | `InpCloseScope` | all positions | `0` closes every position on the account, `1` closes only the magic-filtered ones. Switch to `1` if you ever hold manual trades in this account. |
-| `InpCloseMinProfit` / `InpCloseMaxDrawdown` | `5000` / `100` | The gate above. |
 | `InpDeletePendingOnClose` | `true` | Also deletes pending orders, which AutoTrading-off does not stop. |
 
 **No switching back on the same day:** while the lock is set, if AutoTrading is turned on again the
@@ -85,8 +90,9 @@ lock file).
 | --- | --- | --- |
 | `InpMagicNumber` | `777` | Your bot's magic. Set `InpFilterByMagic=false` to track everything. |
 | `InpPnlBasis` | bot only | Switch to *whole account* to track equity minus the day's opening equity instead. |
+| `InpMinStopProfit` | `5000` | Gate: the button is never pressed below this profit. |
+| `InpMaxDrawdown` | `100` | Gate: the button is never pressed above this drawdown. With `InpDrawdownMode=0` this is the open floating loss on the bot's positions. Mode 1 measures give-back from the day's peak; mode 2 uses the worse of the two. |
 | `InpTargetProfit` / `InpTargetTolerance` | `6000` / `200` | The "or close to it" band — fires at 5800. |
-| `InpMaxDrawdown` | `100` | With `InpDrawdownMode=0` this is the open floating loss on the bot's positions. Mode 1 measures give-back from the day's peak; mode 2 uses the worse of the two. |
 | `InpTzOffsetMinutes` | `330` | IST = GMT+5:30. The EA derives the window from GMT, so it is immune to your broker's server time and to DST. |
 | `InpStartHour` … `InpEndMinute` | `06:00`–`17:00` | Weekdays only via `InpWeekdaysOnly`. |
 | `InpCloseOnStop` | `true` | Closes the book on stop when profit ≥ 5000 and drawdown ≤ 100 — see above. |

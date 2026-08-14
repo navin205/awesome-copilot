@@ -61,19 +61,17 @@ input bool           InpFilterByMagic   = true;         // Only count trades of 
 input long           InpMagicNumber     = 777;          // Magic number of the bot
 input bool           InpFilterBySymbol  = false;        // Only count trades on this chart's symbol
 
-input group "=== 2. Profit target (account currency, e.g. USC) ==="
-input bool   InpEnableTargetRule  = true;    // RULE A: stop at target
+input group "=== 2. GATE - both must hold before the button is pressed ==="
+input double InpMinStopProfit = 5000.0;  // Never stop below this profit
+input double InpMaxDrawdown   = 100.0;   // Never stop while drawdown is above this
+input ENUM_DD_MODE InpDrawdownMode = DD_OPEN_LOSS; // How drawdown is measured
+
+input group "=== 3. WHEN to stop, once the gate is open ==="
+input bool   InpEnableTargetRule  = true;    // RULE A: stop at the target
 input double InpTargetProfit      = 6000.0;  // Target profit for the day
 input double InpTargetTolerance   = 200.0;   // "Close to it" tolerance (fires at target - this)
-input bool   InpEnableGivebackRule= true;    // RULE B: stop if profit falls back from peak
-input double InpMinLockProfit     = 5000.0;  // Minimum profit worth locking in
+input bool   InpEnableGivebackRule= true;    // RULE B: stop if profit falls back from the peak
 input double InpPeakGiveback      = 400.0;   // Give-back from peak that triggers RULE B
-input bool   InpEnableFailsafeRule= true;    // RULE C: stop above this profit whatever the drawdown
-input double InpFailsafeProfit    = 6500.0;  // Fail-safe profit level
-
-input group "=== 3. Drawdown guard ==="
-input ENUM_DD_MODE InpDrawdownMode = DD_OPEN_LOSS; // How drawdown is measured
-input double InpMaxDrawdown        = 100.0;        // Max drawdown allowed when stopping (RULE A)
 
 input group "=== 4. Session window (IST by default) ==="
 input int  InpTzOffsetMinutes = 330;   // Minutes ahead of GMT (IST = 330)
@@ -83,7 +81,7 @@ input int  InpEndHour         = 17;    // Window end hour
 input int  InpEndMinute       = 0;     // Window end minute
 input bool InpWeekdaysOnly    = true;  // Monday..Friday only
 input bool InpOnlyInWindow    = true;  // Ignore targets outside the window
-input bool InpStopAtWindowEnd = false; // RULE D: stop at window end if profit >= InpMinLockProfit
+input bool InpStopAtWindowEnd = false; // RULE C: stop at window end (gate still applies)
 
 input group "=== 5. Lock behaviour ==="
 input bool InpEnforceLockAllDay = true;  // Re-press the button if AutoTrading is switched back on
@@ -92,8 +90,6 @@ input bool InpDryRun            = false; // Log/alert only, never press the butt
 input group "=== 6. Close out when the stop fires ==="
 input bool InpCloseOnStop            = true;                 // Close open positions when stopping
 input ENUM_CLOSE_SCOPE InpCloseScope = CLOSE_ALL_POSITIONS;  // Which positions to close
-input double InpCloseMinProfit       = 5000.0;               // Only close if day profit >= this
-input double InpCloseMaxDrawdown     = 100.0;                // Only close if drawdown <= this
 input bool InpDeletePendingOnClose   = true;                 // Also delete pending orders
 input int  InpCloseSlippage          = 30;                   // Max deviation when closing, points
 input int  InpClosePasses            = 5;                    // Retry passes over the open trades
@@ -383,12 +379,12 @@ bool CloseScopeMatches()
    return PositionMatches();
   }
 
-//--- true when the day's numbers justify flattening the book
+//--- The stop gate already guarantees profit >= InpMinStopProfit and
+//--- drawdown <= InpMaxDrawdown, so a stop that fires at all is by
+//--- definition a day worth flattening.
 bool ShouldCloseOut()
   {
-   return (InpCloseOnStop
-           && g_dayProfit >= InpCloseMinProfit
-           && g_drawdown  <= InpCloseMaxDrawdown);
+   return InpCloseOnStop;
   }
 
 //--- returns the number of positions still open after all passes
@@ -584,14 +580,6 @@ void FireStop(const string reason)
    //--- close out first: once AutoTrading is off this EA cannot trade either
    if(closeOut)
       msg += CloseOutNow();
-   else
-      if(InpCloseOnStop)
-        {
-         Print(StringFormat("AlgoStopGuard: leaving positions open - profit %.2f (need >= %.2f), "
-                            "drawdown %.2f (need <= %.2f).",
-                            g_dayProfit, InpCloseMinProfit, g_drawdown, InpCloseMaxDrawdown));
-         msg += " | positions left open (close-out conditions not met)";
-        }
 
    if(TurnAlgoTradingOff())
      {
@@ -628,50 +616,63 @@ void FireStop(const string reason)
 //+------------------------------------------------------------------+
 //| Rule evaluation                                                  |
 //+------------------------------------------------------------------+
+//--- the two conditions that must BOTH hold before the button may be pressed
+bool GateOpen()
+  {
+   return (g_dayProfit >= InpMinStopProfit && g_drawdown <= InpMaxDrawdown);
+  }
+
+//--- explain, at most once a minute, why an otherwise ready day is still running
+void LogGateBlock()
+  {
+   if(TimeCurrent() - g_lastArmedLog <= 60)
+      return;
+
+   //--- only worth saying when the profit side is already there
+   if(g_dayProfit < InpMinStopProfit)
+      return;
+
+   g_lastArmedLog = TimeCurrent();
+   Print(StringFormat("AlgoStopGuard: HOLDING - profit %.2f is above %.2f but drawdown %.2f is above %.2f. "
+                      "The button stays ON until the drawdown comes in.",
+                      g_dayProfit, InpMinStopProfit, g_drawdown, InpMaxDrawdown));
+  }
+
 bool EvaluateRules(string &reason)
   {
+   //--- GATE: profit floor and drawdown ceiling. No rule below can override this.
+   if(!GateOpen())
+     {
+      LogGateBlock();
+      return false;
+     }
+
+   string gate = StringFormat("profit %.2f >= %.2f and drawdown %.2f <= %.2f",
+                              g_dayProfit, InpMinStopProfit, g_drawdown, InpMaxDrawdown);
+
    double trigger = InpTargetProfit - InpTargetTolerance;
 
-   // RULE C - fail-safe: profit far past target, take it whatever the drawdown
-   if(InpEnableFailsafeRule && g_dayProfit >= InpFailsafeProfit)
-     {
-      reason = StringFormat("RULE C fail-safe: profit %.2f >= %.2f", g_dayProfit, InpFailsafeProfit);
-      return true;
-     }
-
-   // RULE A - target reached (or close to it) with an acceptable drawdown
+   // RULE A - target reached, or close enough to it
    if(InpEnableTargetRule && g_dayProfit >= trigger)
      {
-      if(g_drawdown <= InpMaxDrawdown)
-        {
-         reason = StringFormat("RULE A target: profit %.2f >= %.2f with drawdown %.2f <= %.2f",
-                               g_dayProfit, trigger, g_drawdown, InpMaxDrawdown);
-         return true;
-        }
-
-      if(TimeCurrent() - g_lastArmedLog > 60)
-        {
-         g_lastArmedLog = TimeCurrent();
-         Print(StringFormat("AlgoStopGuard: ARMED - profit %.2f is at target but drawdown %.2f > %.2f, waiting.",
-                            g_dayProfit, g_drawdown, InpMaxDrawdown));
-        }
-     }
-
-   // RULE B - profit was above the lock level and is giving back
-   if(InpEnableGivebackRule
-      && g_dayPeakProfit >= InpMinLockProfit
-      && g_dayProfit     >= InpMinLockProfit
-      && (g_dayPeakProfit - g_dayProfit) >= InpPeakGiveback)
-     {
-      reason = StringFormat("RULE B lock-in: peak %.2f, now %.2f (gave back %.2f >= %.2f)",
-                            g_dayPeakProfit, g_dayProfit, g_dayPeakProfit - g_dayProfit, InpPeakGiveback);
+      reason = StringFormat("RULE A target (%s, trigger %.2f)", gate, trigger);
       return true;
      }
 
-   // RULE D - window is closing with a profit worth keeping
-   if(InpStopAtWindowEnd && WindowJustEnded() && g_dayProfit >= InpMinLockProfit)
+   // RULE B - the day peaked and is now giving profit back
+   if(InpEnableGivebackRule
+      && g_dayPeakProfit >= InpMinStopProfit
+      && (g_dayPeakProfit - g_dayProfit) >= InpPeakGiveback)
      {
-      reason = StringFormat("RULE D window end: profit %.2f >= %.2f", g_dayProfit, InpMinLockProfit);
+      reason = StringFormat("RULE B lock-in: peak %.2f, gave back %.2f >= %.2f (%s)",
+                            g_dayPeakProfit, g_dayPeakProfit - g_dayProfit, InpPeakGiveback, gate);
+      return true;
+     }
+
+   // RULE C - the session window is closing
+   if(InpStopAtWindowEnd && WindowJustEnded())
+     {
+      reason = StringFormat("RULE C window end (%s)", gate);
       return true;
      }
 
@@ -690,14 +691,15 @@ void DrawPanel()
    MqlDateTime t;
    TimeToStruct(LocalNow(), t);
 
-   string closeInfo;
-   if(!InpCloseOnStop)
-      closeInfo = "no";
-   else
-      closeInfo = StringFormat("%s if P/L >= %.0f and DD <= %.0f  [%s]",
-                               (ShouldCloseOut() ? "YES" : "not yet"),
-                               InpCloseMinProfit, InpCloseMaxDrawdown,
-                               (InpCloseScope == CLOSE_ALL_POSITIONS ? "all positions" : "tracked only"));
+   string gateInfo = StringFormat("%s  (needs P/L >= %.0f and DD <= %.0f)",
+                                  (GateOpen() ? "OPEN" : "CLOSED"),
+                                  InpMinStopProfit, InpMaxDrawdown);
+
+   string closeInfo = (InpCloseOnStop
+                       ? StringFormat("yes - %s%s",
+                                      (InpCloseScope == CLOSE_ALL_POSITIONS ? "all positions" : "tracked only"),
+                                      (InpDeletePendingOnClose ? " + pendings" : ""))
+                       : "no");
 
    string state;
    if(g_lockedToday)
@@ -721,7 +723,8 @@ void DrawPanel()
                     "Peak today      : %10.2f %s\n"
                     "Drawdown        : %10.2f %s  (max %.2f)\n"
                     "-----------------------------------------\n"
-                    "Fires at        : %10.2f %s\n"
+                    "GATE            : %s\n"
+                    "Target fires at : %10.2f %s\n"
                     "Close on stop   : %s\n"
                     "AutoTrading     : %s\n"
                     "State           : %s%s",
@@ -735,6 +738,7 @@ void DrawPanel()
                     g_dayProfit, ccy,
                     g_dayPeakProfit, ccy,
                     g_drawdown, ccy, InpMaxDrawdown,
+                    gateInfo,
                     InpTargetProfit - InpTargetTolerance, ccy,
                     closeInfo,
                     (AlgoTradingEnabled() ? "ON" : "OFF"),
@@ -766,8 +770,15 @@ int OnInit()
       Print("AlgoStopGuard: InpTargetTolerance must be between 0 and InpTargetProfit.");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(InpMinLockProfit > InpTargetProfit)
-      Print("AlgoStopGuard: note - InpMinLockProfit is above InpTargetProfit, RULE B will rarely fire.");
+   if(InpMinStopProfit <= 0.0)
+     {
+      Print("AlgoStopGuard: InpMinStopProfit must be greater than 0.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpMinStopProfit > InpTargetProfit - InpTargetTolerance)
+      Print("AlgoStopGuard: note - the profit gate (", DoubleToString(InpMinStopProfit, 2),
+            ") is above the RULE A trigger (", DoubleToString(InpTargetProfit - InpTargetTolerance, 2),
+            "), so the gate is what decides RULE A.");
    if(InpStartHour < 0 || InpStartHour > 23 || InpEndHour < 0 || InpEndHour > 23)
      {
       Print("AlgoStopGuard: session hours must be between 0 and 23.");
@@ -793,18 +804,17 @@ int OnInit()
    EventSetTimer(period);
 
    Print("AlgoStopGuard: started on ", _Symbol,
+         " | GATE: stop only when P/L >= ", DoubleToString(InpMinStopProfit, 2),
+         " AND drawdown <= ", DoubleToString(InpMaxDrawdown, 2),
          " | target ", DoubleToString(InpTargetProfit, 2),
          " (fires at ", DoubleToString(InpTargetProfit - InpTargetTolerance, 2), ")",
-         " | max drawdown ", DoubleToString(InpMaxDrawdown, 2),
          " | window ", InpStartHour, ":", InpStartMinute, "-", InpEndHour, ":", InpEndMinute,
          " GMT+", DoubleToString(InpTzOffsetMinutes / 60.0, 1));
 
    if(InpCloseOnStop)
-      Print("AlgoStopGuard: on stop it will close ",
+      Print("AlgoStopGuard: when the stop fires it will also close ",
             (InpCloseScope == CLOSE_ALL_POSITIONS ? "ALL open positions" : "only tracked positions"),
-            (InpDeletePendingOnClose ? " plus pending orders" : ""),
-            " when day P/L >= ", DoubleToString(InpCloseMinProfit, 2),
-            " and drawdown <= ", DoubleToString(InpCloseMaxDrawdown, 2), ".");
+            (InpDeletePendingOnClose ? " plus pending orders." : "."));
 
    DrawPanel();
    return INIT_SUCCEEDED;

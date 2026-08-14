@@ -6,6 +6,10 @@
 ;
 ; Load it with: EA properties -> Inputs tab -> "Load" -> pick this file.
 ; All values below are in the ACCOUNT CURRENCY (USC on a cent account).
+;
+; THE RULE: the Algo Trading button is only ever switched off when BOTH
+;   day profit >= InpMinStopProfit (5000)  AND  drawdown <= InpMaxDrawdown (100)
+; are true at that instant. Nothing below can override those two.
 ; ------------------------------------------------------------------
 
 ; === 1. What to track ===
@@ -15,23 +19,20 @@ InpFilterByMagic=true
 InpMagicNumber=777
 InpFilterBySymbol=false
 
-; === 2. Profit target ===
-; Fires at 6000 - 200 = 5800 ("or close to it")
+; === 2. GATE - both must hold before the button is pressed ===
+InpMinStopProfit=5000.0
+InpMaxDrawdown=100.0
+; 0 = open floating loss, 1 = give-back from day peak, 2 = worst of both
+InpDrawdownMode=0
+
+; === 3. WHEN to stop, once the gate is open ===
+; Rule A fires at 6000 - 200 = 5800 ("or close to it")
 InpEnableTargetRule=true
 InpTargetProfit=6000.0
 InpTargetTolerance=200.0
-; Lock-in: once the day peaked above 5000, stop if it gives back 400
+; Rule B: day peaked above the gate and has given back this much
 InpEnableGivebackRule=true
-InpMinLockProfit=5000.0
 InpPeakGiveback=400.0
-; Fail-safe: above 6500 stop no matter what the drawdown is
-InpEnableFailsafeRule=true
-InpFailsafeProfit=6500.0
-
-; === 3. Drawdown guard ===
-; 0 = open floating loss, 1 = give-back from day peak, 2 = worst of both
-InpDrawdownMode=0
-InpMaxDrawdown=100.0
 
 ; === 4. Session window (IST = GMT+5:30 = 330 minutes) ===
 InpTzOffsetMinutes=330
@@ -41,6 +42,7 @@ InpEndHour=17
 InpEndMinute=0
 InpWeekdaysOnly=true
 InpOnlyInWindow=true
+; Rule C: stop at 17:00 if the gate happens to be open then
 InpStopAtWindowEnd=false
 
 ; === 5. Lock behaviour ===
@@ -49,13 +51,11 @@ InpEnforceLockAllDay=true
 InpDryRun=false
 
 ; === 6. Close out when the stop fires ===
-; Flatten the book on stop, but only when the day is genuinely in the money:
-; profit >= 5000 AND drawdown <= 100. Otherwise positions are left alone.
+; The gate already guarantees profit >= 5000 and drawdown <= 100,
+; so whenever the button goes off the book is flattened too.
 InpCloseOnStop=true
 ; 0 = every open position on the account, 1 = only magic-777 positions
 InpCloseScope=0
-InpCloseMinProfit=5000.0
-InpCloseMaxDrawdown=100.0
 ; Pending orders still fire with AutoTrading off, so clear them too
 InpDeletePendingOnClose=true
 InpCloseSlippage=30
