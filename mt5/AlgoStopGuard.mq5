@@ -46,6 +46,12 @@ enum ENUM_DD_MODE
    DD_WORST_OF_2  = 2    // Worst of the two (strictest)
   };
 
+enum ENUM_CLOSE_SCOPE
+  {
+   CLOSE_ALL_POSITIONS = 0,   // Every open position on the account
+   CLOSE_TRACKED_ONLY  = 1    // Only the positions this EA tracks (magic filtered)
+  };
+
 //+------------------------------------------------------------------+
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
@@ -81,10 +87,18 @@ input bool InpStopAtWindowEnd = false; // RULE D: stop at window end if profit >
 
 input group "=== 5. Lock behaviour ==="
 input bool InpEnforceLockAllDay = true;  // Re-press the button if AutoTrading is switched back on
-input bool InpCloseAllOnStop    = false; // Close tracked open positions before stopping
-input bool InpDryRun            = false; // Log/alert only, never press the button
+input bool InpDryRun            = false; // Log/alert only, never press the button or close trades
 
-input group "=== 6. Notifications & advanced ==="
+input group "=== 6. Close out when the stop fires ==="
+input bool InpCloseOnStop            = true;                 // Close open positions when stopping
+input ENUM_CLOSE_SCOPE InpCloseScope = CLOSE_ALL_POSITIONS;  // Which positions to close
+input double InpCloseMinProfit       = 5000.0;               // Only close if day profit >= this
+input double InpCloseMaxDrawdown     = 100.0;                // Only close if drawdown <= this
+input bool InpDeletePendingOnClose   = true;                 // Also delete pending orders
+input int  InpCloseSlippage          = 30;                   // Max deviation when closing, points
+input int  InpClosePasses            = 5;                    // Retry passes over the open trades
+
+input group "=== 7. Notifications & advanced ==="
 input bool InpAlertOnStop        = true;   // Pop-up alert
 input bool InpPushOnStop         = false;  // Push notification to the MT5 mobile app
 input bool InpShowPanel          = true;   // Show status panel on the chart
@@ -359,30 +373,121 @@ bool TurnAlgoTradingOff()
   }
 
 //+------------------------------------------------------------------+
-//| Closing tracked positions (optional)                             |
+//| Closing out when the stop fires                                  |
 //+------------------------------------------------------------------+
-void CloseTrackedPositions()
+//--- is the currently selected position in scope for closing?
+bool CloseScopeMatches()
   {
-   for(int pass = 0; pass < 3; pass++)
+   if(InpCloseScope == CLOSE_ALL_POSITIONS)
+      return true;
+   return PositionMatches();
+  }
+
+//--- true when the day's numbers justify flattening the book
+bool ShouldCloseOut()
+  {
+   return (InpCloseOnStop
+           && g_dayProfit >= InpCloseMinProfit
+           && g_drawdown  <= InpCloseMaxDrawdown);
+  }
+
+//--- returns the number of positions still open after all passes
+int CloseOpenPositions()
+  {
+   int remaining = 0;
+
+   for(int pass = 1; pass <= InpClosePasses; pass++)
      {
-      bool any = false;
+      remaining = 0;
+
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0)
             continue;
-         if(InpPnlBasis == PNL_BOT_ONLY && !PositionMatches())
+         if(!CloseScopeMatches())
             continue;
 
-         any = true;
-         if(!g_trade.PositionClose(ticket))
-            Print("AlgoStopGuard: close failed for #", ticket,
-                  " retcode=", g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+         g_trade.SetTypeFillingBySymbol(PositionGetString(POSITION_SYMBOL));
+
+         if(!g_trade.PositionClose(ticket, InpCloseSlippage))
+           {
+            remaining++;
+            Print("AlgoStopGuard: close failed for position #", ticket,
+                  " (pass ", pass, ") retcode=", g_trade.ResultRetcode(),
+                  " ", g_trade.ResultRetcodeDescription());
+           }
         }
-      if(!any)
-         return;
-      Sleep(500);
+
+      if(remaining == 0)
+         break;
+      Sleep(700);
      }
+   return remaining;
+  }
+
+//--- pending orders survive AutoTrading being off, so clear them too
+int DeletePendingOrders()
+  {
+   int remaining = 0;
+
+   for(int pass = 1; pass <= InpClosePasses; pass++)
+     {
+      remaining = 0;
+
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0)
+            continue;
+
+         if(InpCloseScope == CLOSE_TRACKED_ONLY)
+           {
+            if(InpFilterByMagic && OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+               continue;
+            if(InpFilterBySymbol && OrderGetString(ORDER_SYMBOL) != _Symbol)
+               continue;
+           }
+
+         if(!g_trade.OrderDelete(ticket))
+           {
+            remaining++;
+            Print("AlgoStopGuard: delete failed for order #", ticket,
+                  " (pass ", pass, ") retcode=", g_trade.ResultRetcode(),
+                  " ", g_trade.ResultRetcodeDescription());
+           }
+        }
+
+      if(remaining == 0)
+         break;
+      Sleep(700);
+     }
+   return remaining;
+  }
+
+//--- flatten the book; must run BEFORE AutoTrading is switched off
+string CloseOutNow()
+  {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+     {
+      Print("AlgoStopGuard: cannot close out - trading is not allowed for this EA right now.");
+      return " | could not close positions (trading not allowed)";
+     }
+
+   int stuckPositions = CloseOpenPositions();
+   int stuckOrders    = (InpDeletePendingOnClose ? DeletePendingOrders() : 0);
+
+   if(stuckPositions == 0 && stuckOrders == 0)
+     {
+      Print("AlgoStopGuard: all in-scope positions closed",
+            (InpDeletePendingOnClose ? " and pending orders deleted." : "."));
+      return " | positions closed";
+     }
+
+   Print("AlgoStopGuard: close-out incomplete - ", stuckPositions,
+         " position(s) and ", stuckOrders, " pending order(s) remain. Close them manually.");
+   return StringFormat(" | CLOSE-OUT INCOMPLETE: %d position(s), %d order(s) left open",
+                       stuckPositions, stuckOrders);
   }
 
 //+------------------------------------------------------------------+
@@ -460,20 +565,33 @@ void FireStop(const string reason)
                              reason, g_dayProfit, ccy, g_drawdown, g_dayPeakProfit);
    Print(msg);
 
+   bool closeOut = ShouldCloseOut();
+
    //--- dry run: report once, arm the in-memory lock so the log is not flooded
    if(InpDryRun)
      {
       g_lockedToday    = true;      // not persisted: a reload re-arms the guard
       g_lastStopReason = "DRY RUN - " + reason;
-      msg += " | DRY RUN - the AutoTrading button was NOT pressed.";
+      msg += " | DRY RUN - the AutoTrading button was NOT pressed";
+      msg += (closeOut ? " and positions were NOT closed (they would have been)."
+                       : " and positions were not eligible for closing.");
       Print(msg);
       if(InpAlertOnStop)
          Alert(msg);
       return;
      }
 
-   if(InpCloseAllOnStop)
-      CloseTrackedPositions();
+   //--- close out first: once AutoTrading is off this EA cannot trade either
+   if(closeOut)
+      msg += CloseOutNow();
+   else
+      if(InpCloseOnStop)
+        {
+         Print(StringFormat("AlgoStopGuard: leaving positions open - profit %.2f (need >= %.2f), "
+                            "drawdown %.2f (need <= %.2f).",
+                            g_dayProfit, InpCloseMinProfit, g_drawdown, InpCloseMaxDrawdown));
+         msg += " | positions left open (close-out conditions not met)";
+        }
 
    if(TurnAlgoTradingOff())
      {
@@ -572,6 +690,15 @@ void DrawPanel()
    MqlDateTime t;
    TimeToStruct(LocalNow(), t);
 
+   string closeInfo;
+   if(!InpCloseOnStop)
+      closeInfo = "no";
+   else
+      closeInfo = StringFormat("%s if P/L >= %.0f and DD <= %.0f  [%s]",
+                               (ShouldCloseOut() ? "YES" : "not yet"),
+                               InpCloseMinProfit, InpCloseMaxDrawdown,
+                               (InpCloseScope == CLOSE_ALL_POSITIONS ? "all positions" : "tracked only"));
+
    string state;
    if(g_lockedToday)
       state = "STOPPED for today (" + g_lastStopReason + ")";
@@ -595,6 +722,7 @@ void DrawPanel()
                     "Drawdown        : %10.2f %s  (max %.2f)\n"
                     "-----------------------------------------\n"
                     "Fires at        : %10.2f %s\n"
+                    "Close on stop   : %s\n"
                     "AutoTrading     : %s\n"
                     "State           : %s%s",
                     t.hour, t.min, t.sec, LocalDayString(),
@@ -608,6 +736,7 @@ void DrawPanel()
                     g_dayPeakProfit, ccy,
                     g_drawdown, ccy, InpMaxDrawdown,
                     InpTargetProfit - InpTargetTolerance, ccy,
+                    closeInfo,
                     (AlgoTradingEnabled() ? "ON" : "OFF"),
                     state,
                     (InpDryRun ? "\nMODE            : DRY RUN" : ""));
@@ -644,6 +773,11 @@ int OnInit()
       Print("AlgoStopGuard: session hours must be between 0 and 23.");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpCloseOnStop && InpClosePasses < 1)
+     {
+      Print("AlgoStopGuard: InpClosePasses must be at least 1.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
    g_trade.SetAsyncMode(false);
    if(InpFilterByMagic)
@@ -664,6 +798,13 @@ int OnInit()
          " | max drawdown ", DoubleToString(InpMaxDrawdown, 2),
          " | window ", InpStartHour, ":", InpStartMinute, "-", InpEndHour, ":", InpEndMinute,
          " GMT+", DoubleToString(InpTzOffsetMinutes / 60.0, 1));
+
+   if(InpCloseOnStop)
+      Print("AlgoStopGuard: on stop it will close ",
+            (InpCloseScope == CLOSE_ALL_POSITIONS ? "ALL open positions" : "only tracked positions"),
+            (InpDeletePendingOnClose ? " plus pending orders" : ""),
+            " when day P/L >= ", DoubleToString(InpCloseMinProfit, 2),
+            " and drawdown <= ", DoubleToString(InpCloseMaxDrawdown, 2), ".");
 
    DrawPanel();
    return INIT_SUCCEEDED;
