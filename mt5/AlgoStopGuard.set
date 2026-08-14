@@ -70,8 +70,8 @@ InpEnforceLockAllDay=true
 InpDryRun=false
 
 ; === 6. Close out when the stop fires ===
-; The gate already guarantees profit >= 5000 and drawdown <= 100,
-; so whenever the button goes off the book is flattened too.
+; Every stop path flattens the book: a gated stop because the target is
+; banked, a RULE D bail-out because the day has turned.
 InpCloseOnStop=true
 ; 0 = every open position on the account, 1 = only magic-777 positions
 InpCloseScope=0
