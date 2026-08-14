@@ -1,0 +1,59 @@
+; ------------------------------------------------------------------
+; AlgoStopGuard.set - preset for AlgoStopGuard.mq5
+;
+; Profile: Vantage cent account (USC), bot magic 777,
+;          06:00-17:00 IST on weekdays, bank 5000-6000 USC.
+;
+; Load it with: EA properties -> Inputs tab -> "Load" -> pick this file.
+; All values below are in the ACCOUNT CURRENCY (USC on a cent account).
+; ------------------------------------------------------------------
+
+; === 1. What to track ===
+; 0 = bot only (magic filtered), 1 = whole account equity
+InpPnlBasis=0
+InpFilterByMagic=true
+InpMagicNumber=777
+InpFilterBySymbol=false
+
+; === 2. Profit target ===
+; Fires at 6000 - 200 = 5800 ("or close to it")
+InpEnableTargetRule=true
+InpTargetProfit=6000.0
+InpTargetTolerance=200.0
+; Lock-in: once the day peaked above 5000, stop if it gives back 400
+InpEnableGivebackRule=true
+InpMinLockProfit=5000.0
+InpPeakGiveback=400.0
+; Fail-safe: above 6500 stop no matter what the drawdown is
+InpEnableFailsafeRule=true
+InpFailsafeProfit=6500.0
+
+; === 3. Drawdown guard ===
+; 0 = open floating loss, 1 = give-back from day peak, 2 = worst of both
+InpDrawdownMode=0
+InpMaxDrawdown=100.0
+
+; === 4. Session window (IST = GMT+5:30 = 330 minutes) ===
+InpTzOffsetMinutes=330
+InpStartHour=6
+InpStartMinute=0
+InpEndHour=17
+InpEndMinute=0
+InpWeekdaysOnly=true
+InpOnlyInWindow=true
+InpStopAtWindowEnd=false
+
+; === 5. Lock behaviour ===
+InpEnforceLockAllDay=true
+InpCloseAllOnStop=false
+; Set InpDryRun=true for the first day to watch it without touching the button
+InpDryRun=false
+
+; === 6. Notifications & advanced ===
+InpAlertOnStop=true
+InpPushOnStop=false
+InpShowPanel=true
+InpTimerSeconds=1
+InpMaxClickAttempts=5
+; Terminal command id of the AutoTrading button (MT5 = 33020)
+InpAlgoButtonCmdId=33020
