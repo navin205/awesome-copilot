@@ -8,8 +8,12 @@
 ; All values below are in the ACCOUNT CURRENCY (USC on a cent account).
 ;
 ; THE RULE: the Algo Trading button is only ever switched off when BOTH
-;   day profit >= InpMinStopProfit (5000)  AND  drawdown <= InpMaxDrawdown (100)
+;   day profit >= InpMinStopProfit (5000)
+;   drawdown  <= the ceiling in force: 100 normally, 1000 once the day
+;                has touched 6000 (InpRelaxDdAtProfit)
 ; are true at that instant. Nothing below can override those two.
+; On a stop: positions and pending orders are closed FIRST, then the
+; button is pressed.
 ; ------------------------------------------------------------------
 
 ; === 1. What to track ===
@@ -21,7 +25,12 @@ InpFilterBySymbol=false
 
 ; === 2. GATE - both must hold before the button is pressed ===
 InpMinStopProfit=5000.0
+; Drawdown ceiling while the day is still between 5000 and 6000
 InpMaxDrawdown=100.0
+; Once the day has TOUCHED 6000 the ceiling widens to 1000 for the rest
+; of the day (set InpRelaxDdAtProfit=0 to keep the tight ceiling always)
+InpRelaxDdAtProfit=6000.0
+InpMaxDrawdownAtTarget=1000.0
 ; 0 = open floating loss, 1 = give-back from day peak, 2 = worst of both
 InpDrawdownMode=0
 

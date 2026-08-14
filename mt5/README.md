@@ -34,11 +34,23 @@ Every second, inside the session window, it computes the day's P/L for magic `77
 
 ### The gate — the button never goes off unless both of these hold
 
-> **day profit ≥ `InpMinStopProfit` (5000)** **and** **drawdown ≤ `InpMaxDrawdown` (100)**
+> **day profit ≥ `InpMinStopProfit` (5000)** **and** **drawdown ≤ the ceiling in force**
 
-This is checked at the instant of stopping and nothing can override it. If profit is at 6000 but the
-drawdown is 300, the EA does **not** press the button — it logs `HOLDING …` once a minute and waits
-for the drawdown to come in.
+The ceiling is tiered, because a drawdown you would not accept at 5200 is worth accepting once the
+day is already made:
+
+| While the day… | Ceiling | Input |
+| --- | --- | --- |
+| has never reached 6000 | **100** | `InpMaxDrawdown` |
+| has touched 6000 at any point | **1000** | `InpMaxDrawdownAtTarget`, armed by `InpRelaxDdAtProfit` |
+
+The widening is sticky: it is keyed to the day's *peak*, so once 6000 has printed the 1000 ceiling
+stays in force for the rest of the day even if profit slips back to 5600. Set
+`InpRelaxDdAtProfit=0` to disable the tier and keep 100 all day.
+
+The gate is checked at the instant of stopping and nothing can override it. Below 6000, a day sitting
+at 5500 with a 300 drawdown keeps trading — the EA logs `HOLDING …` once a minute naming the ceiling
+in force, and waits.
 
 ### The rules — *when* to stop, once the gate is open
 
@@ -52,9 +64,10 @@ Rule A is your main condition. Rule B is what holds the 5000–6000 band togethe
 5900 and starts sliding, B stops the day at ~5500 rather than waiting for a 5800 print that may never
 come back. Both still have to pass the gate.
 
-**The trade-off to know about:** because the drawdown check is absolute, a day that reaches 6000 with
-a stubborn 300 drawdown will keep trading, and that profit can bleed away. That is the behaviour you
-asked for. If you ever want to relax it, raise `InpMaxDrawdown` — do not expect a rule to bypass it.
+**The trade-off to know about:** the drawdown check is absolute, so a day stuck at 5500 with a 300
+drawdown keeps trading and that profit can bleed away. The 1000 tier removes this above 6000, but
+between 5000 and 6000 the tight ceiling still rules. If that proves too strict in practice, raise
+`InpMaxDrawdown` — no rule will bypass it.
 
 When a rule fires the EA closes out (see below), presses the button, verifies
 `TERMINAL_TRADE_ALLOWED` actually went false (retrying up to `InpMaxClickAttempts` times), logs and
@@ -91,7 +104,8 @@ lock file).
 | `InpMagicNumber` | `777` | Your bot's magic. Set `InpFilterByMagic=false` to track everything. |
 | `InpPnlBasis` | bot only | Switch to *whole account* to track equity minus the day's opening equity instead. |
 | `InpMinStopProfit` | `5000` | Gate: the button is never pressed below this profit. |
-| `InpMaxDrawdown` | `100` | Gate: the button is never pressed above this drawdown. With `InpDrawdownMode=0` this is the open floating loss on the bot's positions. Mode 1 measures give-back from the day's peak; mode 2 uses the worse of the two. |
+| `InpMaxDrawdown` | `100` | Gate: drawdown ceiling before the day reaches target. With `InpDrawdownMode=0` this is the open floating loss on the bot's positions. Mode 1 measures give-back from the day's peak; mode 2 uses the worse of the two. |
+| `InpRelaxDdAtProfit` / `InpMaxDrawdownAtTarget` | `6000` / `1000` | Once the day touches 6000, the ceiling becomes 1000 for the rest of the day. `0` disables the tier. |
 | `InpTargetProfit` / `InpTargetTolerance` | `6000` / `200` | The "or close to it" band — fires at 5800. |
 | `InpTzOffsetMinutes` | `330` | IST = GMT+5:30. The EA derives the window from GMT, so it is immune to your broker's server time and to DST. |
 | `InpStartHour` … `InpEndMinute` | `06:00`–`17:00` | Weekdays only via `InpWeekdaysOnly`. |

@@ -62,9 +62,11 @@ input long           InpMagicNumber     = 777;          // Magic number of the b
 input bool           InpFilterBySymbol  = false;        // Only count trades on this chart's symbol
 
 input group "=== 2. GATE - both must hold before the button is pressed ==="
-input double InpMinStopProfit = 5000.0;  // Never stop below this profit
-input double InpMaxDrawdown   = 100.0;   // Never stop while drawdown is above this
-input ENUM_DD_MODE InpDrawdownMode = DD_OPEN_LOSS; // How drawdown is measured
+input double InpMinStopProfit       = 5000.0;  // Never stop below this profit
+input double InpMaxDrawdown         = 100.0;   // Drawdown ceiling before the day reaches target
+input double InpRelaxDdAtProfit     = 6000.0;  // Once the day has TOUCHED this profit... (0 = never)
+input double InpMaxDrawdownAtTarget = 1000.0;  // ...the drawdown ceiling becomes this
+input ENUM_DD_MODE InpDrawdownMode  = DD_OPEN_LOSS; // How drawdown is measured
 
 input group "=== 3. WHEN to stop, once the gate is open ==="
 input bool   InpEnableTargetRule  = true;    // RULE A: stop at the target
@@ -112,6 +114,7 @@ bool     g_lockedToday    = false;   // stop already fired for the current IST d
 string   g_currentDay     = "";      // IST date currently being tracked
 double   g_dayStartEquity = 0.0;     // equity captured at the start of the IST day
 double   g_dayPeakProfit  = 0.0;     // best profit seen today
+bool     g_ddRelaxed      = false;   // day touched InpRelaxDdAtProfit: wider ceiling in force
 bool     g_dllOk          = false;   // DLL imports available
 datetime g_lastArmedLog   = 0;       // throttle for "waiting for drawdown" messages
 datetime g_lastEnforceLog = 0;       // throttle for enforcement messages
@@ -271,6 +274,14 @@ void RefreshPnl()
 
    if(g_dayProfit > g_dayPeakProfit)
       g_dayPeakProfit = g_dayProfit;
+
+   if(!g_ddRelaxed && InpRelaxDdAtProfit > 0.0 && g_dayPeakProfit >= InpRelaxDdAtProfit)
+     {
+      g_ddRelaxed = true;
+      Print(StringFormat("AlgoStopGuard: day touched %.2f - drawdown ceiling widened from %.2f to %.2f "
+                         "for the rest of the day.",
+                         g_dayPeakProfit, InpMaxDrawdown, InpMaxDrawdownAtTarget));
+     }
 
    double openLoss  = (g_floating < 0.0 ? -g_floating : 0.0);
    double fromPeak  = g_dayPeakProfit - g_dayProfit;
@@ -543,6 +554,7 @@ void StartNewDay(const string day)
    //--- still sees the whole day's result (deposits/withdrawals aside)
    g_dayStartEquity = AccountInfoDouble(ACCOUNT_BALANCE) - ClosedProfitToday(false);
    g_dayPeakProfit  = 0.0;
+   g_ddRelaxed      = false;
    g_lastStopReason = "";
    g_lockedToday    = (g_lockedDay == day);
    Print("AlgoStopGuard: tracking ", day, " - day start balance ",
@@ -616,10 +628,20 @@ void FireStop(const string reason)
 //+------------------------------------------------------------------+
 //| Rule evaluation                                                  |
 //+------------------------------------------------------------------+
+//--- Drawdown ceiling in force right now. It widens for the rest of the day
+//--- once the day has touched InpRelaxDdAtProfit: at that point the target is
+//--- banked and a wider swing is worth tolerating to get out.
+double EffectiveMaxDrawdown()
+  {
+   if(InpRelaxDdAtProfit > 0.0 && g_dayPeakProfit >= InpRelaxDdAtProfit)
+      return InpMaxDrawdownAtTarget;
+   return InpMaxDrawdown;
+  }
+
 //--- the two conditions that must BOTH hold before the button may be pressed
 bool GateOpen()
   {
-   return (g_dayProfit >= InpMinStopProfit && g_drawdown <= InpMaxDrawdown);
+   return (g_dayProfit >= InpMinStopProfit && g_drawdown <= EffectiveMaxDrawdown());
   }
 
 //--- explain, at most once a minute, why an otherwise ready day is still running
@@ -633,9 +655,9 @@ void LogGateBlock()
       return;
 
    g_lastArmedLog = TimeCurrent();
-   Print(StringFormat("AlgoStopGuard: HOLDING - profit %.2f is above %.2f but drawdown %.2f is above %.2f. "
-                      "The button stays ON until the drawdown comes in.",
-                      g_dayProfit, InpMinStopProfit, g_drawdown, InpMaxDrawdown));
+   Print(StringFormat("AlgoStopGuard: HOLDING - profit %.2f is above %.2f but drawdown %.2f is above the "
+                      "ceiling of %.2f in force. The button stays ON until the drawdown comes in.",
+                      g_dayProfit, InpMinStopProfit, g_drawdown, EffectiveMaxDrawdown()));
   }
 
 bool EvaluateRules(string &reason)
@@ -648,7 +670,7 @@ bool EvaluateRules(string &reason)
      }
 
    string gate = StringFormat("profit %.2f >= %.2f and drawdown %.2f <= %.2f",
-                              g_dayProfit, InpMinStopProfit, g_drawdown, InpMaxDrawdown);
+                              g_dayProfit, InpMinStopProfit, g_drawdown, EffectiveMaxDrawdown());
 
    double trigger = InpTargetProfit - InpTargetTolerance;
 
@@ -691,9 +713,10 @@ void DrawPanel()
    MqlDateTime t;
    TimeToStruct(LocalNow(), t);
 
-   string gateInfo = StringFormat("%s  (needs P/L >= %.0f and DD <= %.0f)",
+   string gateInfo = StringFormat("%s  (needs P/L >= %.0f and DD <= %.0f%s)",
                                   (GateOpen() ? "OPEN" : "CLOSED"),
-                                  InpMinStopProfit, InpMaxDrawdown);
+                                  InpMinStopProfit, EffectiveMaxDrawdown(),
+                                  (g_ddRelaxed ? " - widened, target was reached" : ""));
 
    string closeInfo = (InpCloseOnStop
                        ? StringFormat("yes - %s%s",
@@ -721,7 +744,7 @@ void DrawPanel()
                     "Floating        : %10.2f %s\n"
                     "DAY P/L         : %10.2f %s\n"
                     "Peak today      : %10.2f %s\n"
-                    "Drawdown        : %10.2f %s  (max %.2f)\n"
+                    "Drawdown        : %10.2f %s  (ceiling %.2f)\n"
                     "-----------------------------------------\n"
                     "GATE            : %s\n"
                     "Target fires at : %10.2f %s\n"
@@ -737,7 +760,7 @@ void DrawPanel()
                     g_floating, ccy,
                     g_dayProfit, ccy,
                     g_dayPeakProfit, ccy,
-                    g_drawdown, ccy, InpMaxDrawdown,
+                    g_drawdown, ccy, EffectiveMaxDrawdown(),
                     gateInfo,
                     InpTargetProfit - InpTargetTolerance, ccy,
                     closeInfo,
@@ -775,6 +798,9 @@ int OnInit()
       Print("AlgoStopGuard: InpMinStopProfit must be greater than 0.");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpRelaxDdAtProfit > 0.0 && InpMaxDrawdownAtTarget < InpMaxDrawdown)
+      Print("AlgoStopGuard: note - InpMaxDrawdownAtTarget is below InpMaxDrawdown, so reaching the "
+            "target TIGHTENS the drawdown ceiling. Check that this is intended.");
    if(InpMinStopProfit > InpTargetProfit - InpTargetTolerance)
       Print("AlgoStopGuard: note - the profit gate (", DoubleToString(InpMinStopProfit, 2),
             ") is above the RULE A trigger (", DoubleToString(InpTargetProfit - InpTargetTolerance, 2),
@@ -806,6 +832,10 @@ int OnInit()
    Print("AlgoStopGuard: started on ", _Symbol,
          " | GATE: stop only when P/L >= ", DoubleToString(InpMinStopProfit, 2),
          " AND drawdown <= ", DoubleToString(InpMaxDrawdown, 2),
+         (InpRelaxDdAtProfit > 0.0
+          ? " (ceiling widens to " + DoubleToString(InpMaxDrawdownAtTarget, 2)
+            + " once the day touches " + DoubleToString(InpRelaxDdAtProfit, 2) + ")"
+          : ""),
          " | target ", DoubleToString(InpTargetProfit, 2),
          " (fires at ", DoubleToString(InpTargetProfit - InpTargetTolerance, 2), ")",
          " | window ", InpStartHour, ":", InpStartMinute, "-", InpEndHour, ":", InpEndMinute,
